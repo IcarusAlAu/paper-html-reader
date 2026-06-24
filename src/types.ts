@@ -81,6 +81,8 @@ export type ReaderState = {
   lastReadByDocId: Record<string, string>;
   settings: ReaderSettings;
   panelWidths?: { left: number; right: number };
+  collapsedPanels?: { left: boolean; right: boolean };
+  notesMode?: boolean;
 };
 
 export type AnnotationType = "highlight" | "underline" | "note" | "question";

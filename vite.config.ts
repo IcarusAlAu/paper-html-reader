@@ -24,6 +24,7 @@ const doctorFixHistoryFile = path.join(dataDir, "doctor-fix-history.json");
 const renameHistoryFile = path.join(dataDir, "rename-history.json");
 const tagsDir = path.join(dataDir, "tags");
 const highlightsDir = path.join(dataDir, "highlights");
+const noteDir = path.resolve(wikiRoot, "paper", "Note");
 const editQueues = new Map<string, Promise<unknown>>();
 
 type ReaderState = {
@@ -78,6 +79,7 @@ async function ensureDataDirs() {
   await fs.mkdir(tagsDir, { recursive: true });
   await fs.mkdir(highlightsDir, { recursive: true });
   await fs.mkdir(defaultLibraryDir, { recursive: true });
+  await fs.mkdir(noteDir, { recursive: true });
 }
 
 async function readJson<T>(filePath: string, fallback: T): Promise<T> {
@@ -452,6 +454,45 @@ function apiPlugin(): Plugin {
             execFile("explorer.exe", [dir]);
             sendJson(res, { opened: dir });
             return;
+          }
+
+          /* ── Notes API ── */
+          if (req.method === "GET" && url.pathname === "/api/notes") {
+            const noteEntries = await fs.readdir(noteDir, { withFileTypes: true }).catch(() => []);
+            const notes = [];
+            for (const entry of noteEntries) {
+              if (!entry.isFile() || !entry.name.endsWith(".note.html")) continue;
+              const id = entry.name.replace(/\.note\.html$/, "");
+              const stat = await fs.stat(path.join(noteDir, entry.name));
+              notes.push({ id, fileName: entry.name, mtime: stat.mtime.toISOString() });
+            }
+            notes.sort((a, b) => b.mtime.localeCompare(a.mtime));
+            sendJson(res, { notes });
+            return;
+          }
+
+          const noteMatch = url.pathname.match(/^\/api\/notes\/([^/]+)$/);
+          if (noteMatch) {
+            const noteId = decodeURIComponent(noteMatch[1]).replace(/[^a-zA-Z0-9_-]/g, "");
+            const noteFilePath = path.join(noteDir, `${noteId}.note.html`);
+            if (req.method === "GET") {
+              try {
+                const content = await fs.readFile(noteFilePath, "utf8");
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "text/html; charset=utf-8");
+                res.end(content);
+              } catch {
+                res.statusCode = 404;
+                res.end("Note not found");
+              }
+              return;
+            }
+            if (req.method === "POST") {
+              const body = await readRequestBody(req);
+              await fs.writeFile(noteFilePath, body, "utf8");
+              sendJson(res, { id: noteId, saved: true });
+              return;
+            }
           }
 
           sendJson(res, { error: "Not found" }, 404);

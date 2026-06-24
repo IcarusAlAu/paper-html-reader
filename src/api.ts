@@ -181,3 +181,24 @@ export async function saveTags(docId: string, tags: string[]) {
     body: JSON.stringify(tags)
   });
 }
+
+export async function fetchNote(id: string) {
+  const response = await fetch(`/api/notes/${encodeURIComponent(id)}`);
+  if (response.status === 404) return "";
+  if (!response.ok) throw new Error(await response.text());
+  return response.text();
+}
+
+export async function saveNote(id: string, html: string) {
+  const response = await fetch(`/api/notes/${encodeURIComponent(id)}`, {
+    method: "POST",
+    headers: { "Content-Type": "text/html" },
+    body: html
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<{ id: string; saved: boolean }>;
+}
+
+export async function fetchNoteList() {
+  return request<{ notes: Array<{ id: string; fileName: string; mtime: string }> }>("/api/notes");
+}

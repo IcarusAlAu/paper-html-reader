@@ -2,17 +2,28 @@ import {
   AlertTriangle,
   ArrowDownAZ,
   ArrowUpAZ,
+  Bold,
   BookOpen,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Code2,
   Copy,
   Edit3,
   FileText,
   Filter,
   FolderOpen,
+  Heading2,
+  Heading3,
   Highlighter,
+  Italic,
+  List,
+  ListOrdered,
   ListTree,
   MessageSquarePlus,
+  PanelLeftClose,
+  PanelRightClose,
   Plus,
   RefreshCw,
   Save,
@@ -38,6 +49,7 @@ import {
   fetchDocument,
   fetchHighlights,
   fetchLibrary,
+  fetchNote,
   fetchState,
   fetchTags,
   insertBlock,
@@ -47,6 +59,7 @@ import {
   renameDocument,
   saveAnnotations,
   saveHighlights,
+  saveNote,
   saveState,
   saveTags,
   undoLastEdit,
@@ -352,6 +365,19 @@ export function App() {
   /* ── highlight popup state (read mode) ── */
   const [highlightPopup, setHighlightPopup] = useState<{ x: number; y: number; blockId: string; text: string } | null>(null);
 
+  /* ── notes state ── */
+  const [notesMode, setNotesMode] = useState(state.notesMode ?? false);
+  const [noteContent, setNoteContent] = useState("");
+  const noteEditorRef = useRef<HTMLDivElement>(null);
+  const noteSaveTimer = useRef<number | undefined>(undefined);
+
+  /* ── collapsed panels state ── */
+  const [leftCollapsed, setLeftCollapsed] = useState(state.collapsedPanels?.left ?? false);
+  const [rightCollapsed, setRightCollapsed] = useState(state.collapsedPanels?.right ?? false);
+
+  /* ── iframe context menu state (copy to notes) ── */
+  const [iframeContextMenu, setIframeContextMenu] = useState<{ x: number; y: number; blockId: string; docId: string; blockHtml: string; blockTag: string } | null>(null);
+
   /* ── column divider drag state ── */
   const [isDraggingDivider, setIsDraggingDivider] = useState<null | "left" | "right">(null);
   const dragStartRef = useRef<{ startX: number; startLeft: number; startRight: number }>({ startX: 0, startLeft: 300, startRight: 330 });
@@ -621,6 +647,26 @@ export function App() {
       frameDoc.addEventListener("click", onClick);
       frameDoc.addEventListener("paste", onPaste);
 
+      // Right-click context menu for copy to notes
+      const onContextMenu = (event: MouseEvent) => {
+        const target = event.target as HTMLElement;
+        // Check if we right-clicked on a content block or image
+        const blockEl = target.closest<HTMLElement>("p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, img");
+        if (!blockEl || blockEl.closest("script,style,nav#outline,math")) return;
+
+        event.preventDefault();
+        const blockId = blockEl.dataset.blockId || blockEl.closest("[data-block-id]")?.getAttribute("data-block-id") || "";
+        const blockHtml = blockEl.outerHTML;
+
+        // Calculate position relative to the page (not iframe)
+        const frameRect = iframe.getBoundingClientRect();
+        const x = frameRect.left + event.clientX;
+        const y = frameRect.top + event.clientY;
+
+        setIframeContextMenu({ x, y, blockId, docId: "", blockHtml, blockTag: blockEl.tagName.toLowerCase() });
+      };
+      frameDoc.addEventListener("contextmenu", onContextMenu);
+
       // Read mode: selectionchange for highlight popup
       const onSelectionChange = () => {
         if (modeRef.current !== "read") return;
@@ -719,6 +765,135 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mode, selectedBlock, selectedPaper, canEditSelectedPaper, editingBlockId, openedDocumentHash, pendingEdits]);
 
+  /* ── panel collapse + notes keyboard shortcuts ─────────── */
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.matches("input, textarea, [contenteditable]")) return;
+
+      if (event.key === "[") {
+        event.preventDefault();
+        toggleLeftPanel();
+      }
+      if (event.key === "]") {
+        event.preventDefault();
+        toggleRightPanel();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [leftCollapsed, rightCollapsed, notesMode]);
+
+  /* ── panel toggle helpers ──────────────────────────────── */
+
+  const toggleLeftPanel = useCallback(() => {
+    setLeftCollapsed((prev) => {
+      const next = !prev;
+      persistState({ ...state, collapsedPanels: { left: next, right: rightCollapsed } }, true);
+      return next;
+    });
+  }, [state, rightCollapsed, persistState]);
+
+  const toggleRightPanel = useCallback(() => {
+    setRightCollapsed((prev) => {
+      const next = !prev;
+      persistState({ ...state, collapsedPanels: { left: leftCollapsed, right: next } }, true);
+      return next;
+    });
+  }, [state, leftCollapsed, persistState]);
+
+  /* ── notes mode toggle ─────────────────────────────────── */
+
+  const toggleNotesMode = useCallback(() => {
+    setNotesMode((prev) => {
+      const next = !prev;
+      persistState({ ...state, notesMode: next }, true);
+      if (next && rightCollapsed) {
+        setRightCollapsed(false);
+        persistState({ ...state, notesMode: next, collapsedPanels: { left: leftCollapsed, right: false } }, true);
+      }
+      return next;
+    });
+  }, [state, rightCollapsed, leftCollapsed, persistState]);
+
+  /* ── notes load / save ─────────────────────────────────── */
+
+  useEffect(() => {
+    if (!notesMode || !selectedPaper) {
+      setNoteContent("");
+      return;
+    }
+    let cancelled = false;
+    fetchNote(selectedPaper.id).then((html) => {
+      if (!cancelled) setNoteContent(html);
+    }).catch(() => {
+      if (!cancelled) setNoteContent("");
+    });
+    return () => { cancelled = true; };
+  }, [notesMode, selectedPaper?.id]);
+
+  const saveNoteContent = useCallback(async (content?: string) => {
+    if (!selectedPaper) return;
+    const html = content ?? noteEditorRef.current?.innerHTML ?? noteContent;
+    try {
+      await saveNote(selectedPaper.id, html);
+      setStatus("笔记已保存");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [selectedPaper, noteContent]);
+
+  /* sync contenteditable when noteContent loads */
+  useEffect(() => {
+    if (noteEditorRef.current && noteContent !== undefined) {
+      if (noteEditorRef.current.innerHTML !== noteContent) {
+        noteEditorRef.current.innerHTML = noteContent;
+      }
+    }
+  }, [noteContent]);
+
+  /* ── copy block to notes ───────────────────────────────── */
+
+  const copyToNotes = useCallback((blockHtml: string, docId: string, blockId: string) => {
+    if (!notesMode) {
+      setNotesMode(true);
+      persistState({ ...state, notesMode: true }, true);
+      if (rightCollapsed) {
+        setRightCollapsed(false);
+      }
+    }
+
+    const clipHtml = `<div class="note-clip" data-doc-id="${docId}" data-block-id="${blockId}">${blockHtml}</div><a class="note-link" data-doc-id="${docId}" data-block-id="${blockId}">📎 来源</a><p><br></p>`;
+
+    /* wait for editor to mount, then insert */
+    setTimeout(() => {
+      const editor = noteEditorRef.current;
+      if (!editor) return;
+      editor.focus();
+
+      // Try to insert at current selection
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && editor.contains(sel.anchorNode)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        const frag = document.createRange().createContextualFragment(clipHtml);
+        range.insertNode(frag);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } else {
+        editor.innerHTML += clipHtml;
+      }
+
+      // Auto-save after insert
+      clearTimeout(noteSaveTimer.current);
+      noteSaveTimer.current = window.setTimeout(() => {
+        saveNoteContent(editor.innerHTML);
+      }, 1000);
+    }, 100);
+  }, [notesMode, rightCollapsed, state, persistState, saveNoteContent]);
+
   /* ── mode switching ─────────────────────────────────────── */
 
   const switchMode = (next: EditorMode) => {
@@ -762,6 +937,30 @@ export function App() {
       lastReadByDocId: { ...state.lastReadByDocId, [paper.id]: new Date().toISOString() }
     });
   };
+
+  /* ── note link click handler ───────────────────────────── */
+
+  const handleNoteEditorClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains("note-link")) {
+      e.preventDefault();
+      const docId = target.dataset.docId;
+      const blockId = target.dataset.blockId;
+      if (docId) {
+        const paper = papers.find((p) => p.id === docId);
+        if (paper) {
+          selectPaper(paper);
+          if (blockId) {
+            setTimeout(() => {
+              const frameDoc = iframeRef.current?.contentDocument;
+              const block = frameDoc?.querySelector(`[data-block-id="${blockId}"]`);
+              block?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }, 500);
+          }
+        }
+      }
+    }
+  }, [papers, selectPaper]);
 
   const updateSettings = (settings: Partial<ReaderState["settings"]>) => {
     persistState({
@@ -1378,6 +1577,14 @@ export function App() {
     return () => document.removeEventListener("click", handler);
   }, [contextMenu]);
 
+  /* close iframe context menu on outside click */
+  useEffect(() => {
+    if (!iframeContextMenu) return;
+    const handler = () => setIframeContextMenu(null);
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, [iframeContextMenu]);
+
   const contextRename = async () => {
     if (!contextMenu) return;
     closeContextMenu();
@@ -1492,13 +1699,18 @@ export function App() {
     <main
       className="app-shell"
       style={{
-        gridTemplateColumns: `${leftWidth}px minmax(520px, 1fr) ${rightWidth}px`,
+        gridTemplateColumns: `${leftCollapsed ? 4 : leftWidth}px ${leftCollapsed ? "0" : "6px"} minmax(520px, 1fr) ${rightCollapsed ? "0" : "6px"} ${rightCollapsed ? 4 : rightWidth}px`,
         cursor: isDraggingDivider ? "col-resize" : undefined,
         userSelect: isDraggingDivider ? "none" : undefined
       }}
     >
       {/* ─── left: library panel ─────────────────────────── */}
-      <aside className="library-panel">
+      {leftCollapsed ? (
+        <aside className="library-panel collapsed-strip" onClick={toggleLeftPanel} title="展开左面板 ([)">
+          <ChevronRight size={16} />
+        </aside>
+      ) : (
+        <aside className="library-panel">
         <div className="brand-row">
           <div className="brand-mark">
             <BookOpen size={19} />
@@ -1598,12 +1810,19 @@ export function App() {
           ))}
         </div>
       </aside>
+      )}
 
       {/* ─── left divider ────────────────────────────────── */}
-      <div
-        className={`column-divider ${isDraggingDivider === "left" ? "active" : ""}`}
-        onMouseDown={handleDividerMouseDown("left")}
-      />
+      {!leftCollapsed && (
+        <div
+          className={`column-divider ${isDraggingDivider === "left" ? "active" : ""}`}
+          onMouseDown={handleDividerMouseDown("left")}
+        >
+          <button className="collapse-btn" onClick={toggleLeftPanel} title="收起左面板 ([)">
+            <PanelLeftClose size={14} />
+          </button>
+        </div>
+      )}
 
       {/* ─── center: reader column ───────────────────────── */}
       <section className="reader-column">
@@ -1739,6 +1958,17 @@ export function App() {
               </>
             )}
 
+            {/* notes toggle button (all modes) */}
+            <button
+              className={`tool-button ${notesMode ? "active" : ""}`}
+              onClick={toggleNotesMode}
+              title="切换笔记面板 (Notes)"
+              style={notesMode ? { background: "#dbeafe", color: "#1d4ed8", borderColor: "#93c5fd" } : {}}
+            >
+              <StickyNote size={16} />
+              笔记
+            </button>
+
             {/* status indicator (all modes) */}
             <span className={`save-state ${isDirty ? "save-state-dirty" : ""}`}>
               <Check size={14} />
@@ -1830,13 +2060,62 @@ export function App() {
       </section>
 
       {/* ─── right divider ───────────────────────────────── */}
-      <div
-        className={`column-divider ${isDraggingDivider === "right" ? "active" : ""}`}
-        onMouseDown={handleDividerMouseDown("right")}
-      />
+      {!rightCollapsed && (
+        <div
+          className={`column-divider ${isDraggingDivider === "right" ? "active" : ""}`}
+          onMouseDown={handleDividerMouseDown("right")}
+        >
+          <button className="collapse-btn" onClick={toggleRightPanel} title="收起右面板 (])">
+            <PanelRightClose size={14} />
+          </button>
+        </div>
+      )}
 
-      {/* ─── right: inspector panel ──────────────────────── */}
-      <aside className="inspector-panel">
+      {/* ─── right panel ──────────────────────────────────── */}
+      {rightCollapsed ? (
+        <aside className="inspector-panel collapsed-strip" onClick={toggleRightPanel} title="展开右面板 (])">
+          <ChevronLeft size={16} />
+        </aside>
+      ) : notesMode ? (
+        <aside className="inspector-panel notes-panel">
+          <div className="notes-toolbar">
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("bold"); }} title="粗体"><Bold size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("italic"); }} title="斜体"><Italic size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h2"); }} title="标题2"><Heading2 size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "h3"); }} title="标题3"><Heading3 size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertUnorderedList"); }} title="无序列表"><List size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("insertOrderedList"); }} title="有序列表"><ListOrdered size={14} /></button>
+            <button className="note-tool-btn" onMouseDown={(e) => { e.preventDefault(); document.execCommand("formatBlock", false, "pre"); }} title="代码块"><Code2 size={14} /></button>
+            <div style={{ flex: 1 }} />
+            <span className="note-file-label">{selectedPaper?.id || "未选择论文"}</span>
+            <button className="note-tool-btn" onClick={() => saveNoteContent()} title="保存笔记 (Ctrl+S)"><Save size={14} /></button>
+          </div>
+          <div
+            ref={noteEditorRef}
+            className="note-editor"
+            contentEditable
+            suppressContentEditableWarning
+            onBlur={() => {
+              clearTimeout(noteSaveTimer.current);
+              noteSaveTimer.current = window.setTimeout(() => {
+                if (noteEditorRef.current && selectedPaper) {
+                  saveNoteContent(noteEditorRef.current.innerHTML);
+                }
+              }, 300);
+            }}
+            onClick={handleNoteEditorClick}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+                e.preventDefault();
+                if (noteEditorRef.current && selectedPaper) {
+                  saveNoteContent(noteEditorRef.current.innerHTML);
+                }
+              }
+            }}
+          />
+        </aside>
+      ) : (
+        <aside className="inspector-panel">
         <div className="tabs">
           <button className={activeTab === "outline" ? "active" : ""} onClick={() => setActiveTab("outline")}>
             <ListTree size={16} />
@@ -2040,6 +2319,7 @@ export function App() {
           </div>
         )}
       </aside>
+      )}
 
       {/* ─── context menu overlay ──────────────────────── */}
       {contextMenu && (
@@ -2090,6 +2370,21 @@ export function App() {
           </button>
           <button className="batch-clear-btn" onClick={() => setSelectedBlockIds(new Set())}>
             取消
+          </button>
+        </div>
+      )}
+
+      {/* ─── iframe context menu (copy to notes) ────────── */}
+      {iframeContextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: iframeContextMenu.x, top: iframeContextMenu.y }}
+        >
+          <button onClick={() => {
+            copyToNotes(iframeContextMenu.blockHtml, selectedPaper?.id || "", iframeContextMenu.blockId);
+            setIframeContextMenu(null);
+          }}>
+            <Copy size={14} /> 复制到笔记
           </button>
         </div>
       )}
