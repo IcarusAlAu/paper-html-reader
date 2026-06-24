@@ -71,7 +71,8 @@ import {
   getScrollProgress,
   labelForDisplayMode,
   parseOutline,
-  scrollToProgress
+  scrollToProgress,
+  typesetMathJax
 } from "./documentTools";
 import type {
   Annotation,
@@ -550,6 +551,7 @@ export function App() {
         return;
       }
       applyReaderSettings(frameDoc, state.settings);
+      typesetMathJax(frameDoc);
       setOutline(parseOutline(frameDoc));
       scrollToProgress(frameWin, state.scrollByDocId[selectedPaper.id] || 0);
       setStatus("Saved");
@@ -1980,7 +1982,7 @@ export function App() {
         {error ? <div className="error-banner">{error}</div> : null}
 
         <div className="reader-frame-wrap">
-          <iframe ref={iframeRef} title="Paper reading area" sandbox="allow-same-origin" />
+          <iframe ref={iframeRef} title="Paper reading area" sandbox="allow-same-origin allow-scripts" />
 
           {/* ── block toolbar popup (edit mode only) ──────── */}
           {selectedBlock && mode === "edit" ? (

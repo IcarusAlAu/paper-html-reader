@@ -29,7 +29,52 @@ export function parseOutline(doc: Document): OutlineItem[] {
 }
 
 export function buildReaderHtml(source: string) {
-  return source.replace(/<script\b[\s\S]*?<\/script>/gi, "<!-- Paper HTML Reader removed an inline script for V0 sandboxed reading. -->");
+  // Strip existing scripts but keep the HTML
+  const cleaned = source.replace(/<script\b[\s\S]*?<\/script>/gi, "<!-- Paper HTML Reader removed an inline script for V0 sandboxed reading. -->");
+  
+  // Inject MathJax config and CDN script before </head>
+  const mathjaxHead = `
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+    displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+    processEscapes: true,
+    processEnvironments: true
+  },
+  options: {
+    skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+  },
+  startup: {
+    ready: () => {
+      MathJax.startup.defaultReady();
+      // Re-typeset when content changes
+      MathJax.startup.promise.then(() => {
+        console.log('MathJax ready');
+      });
+    }
+  }
+};
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+`;
+  
+  // Inject before </head> if exists, otherwise prepend
+  if (cleaned.includes('</head>')) {
+    return cleaned.replace('</head>', mathjaxHead + '</head>');
+  } else if (cleaned.includes('<body')) {
+    return cleaned.replace(/<body/i, mathjaxHead + '<body');
+  } else {
+    return mathjaxHead + cleaned;
+  }
+}
+
+// Re-typeset MathJax after dynamic content updates
+export function typesetMathJax(doc: Document) {
+  const win = doc.defaultView as any;
+  if (win?.MathJax?.typesetPromise) {
+    win.MathJax.typesetPromise([doc.body]).catch((err: any) => console.warn('MathJax typeset error:', err));
+  }
 }
 
 export function applyReaderSettings(doc: Document, settings: ReaderSettings) {
@@ -122,6 +167,32 @@ export function applyReaderSettings(doc: Document, settings: ReaderSettings) {
       border-left: 4px solid #d99b27;
       border-radius: 0 7px 7px 0;
       font-weight: 560;
+    }
+    /* MathJax formula styles */
+    mjx-container {
+      overflow-x: auto;
+      overflow-y: hidden;
+      max-width: 100% !important;
+      padding: 2px 0;
+    }
+    mjx-container[display="true"] {
+      display: block !important;
+      text-align: center;
+      margin: 1em 0;
+      padding: 0.5em 0;
+      overflow-x: auto;
+    }
+    /* Prevent formulas from being hidden by display mode */
+    html[data-reader-mode="translation"] mjx-container,
+    html[data-reader-mode="original"] mjx-container {
+      display: inline-block !important;
+    }
+    html[data-reader-mode="translation"] mjx-container[display="true"] {
+      display: block !important;
+    }
+    /* Formula in translated paragraphs */
+    .translation mjx-container {
+      color: inherit;
     }
   `;
 }
